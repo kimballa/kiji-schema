@@ -152,6 +152,11 @@ public class HBaseDataRequestAdapter {
     // There's a shortcoming in the HBase API that doesn't allow us to specify per-column
     // filters for timestamp ranges and max versions.  We need to generate a request that
     // will include all versions that we need, and add filters for the individual columns.
+
+    // As of HBase 0.94, the ColumnPaginationFilter, which we had been using to enforce
+    // per-column maxVersions no longer returns multiple versions. We now only set a
+    // per-column maxVersions on fully-qualified columns with maxVersions = 1. All
+    // other columns return the largest maxVersions seen on any column request.
     int largestMaxVersions = 1;
     // If every column is paged, we should add a keyonly filter to a single column, so we can have
     // access to entityIds in our KijiRowData that is constructed.
@@ -260,6 +265,18 @@ public class HBaseDataRequestAdapter {
       requestFilter.addFilter(qualifierFilter);
     }
 
+    if (kijiColumnName.isFullyQualified() && !columnRequest.isPagingEnabled()
+        && columnRequest.getMaxVersions() == 1) {
+      // Limit the max versions. This optimization only works for requests for particular
+      // columns within a family. We can't do this for "give me all the cells in a family"
+      // requests because there's no HBase filter that does "give me N versions from each
+      // qualifier." That's okay though; it will get filtered by HBaseKijiRowData.
+      // Starting in HBase 0.94, ColumnPaginationFilter will only respect at most a single
+      // version per qualifier, regardless of the 'limit' parameter. So we only perform this
+      // optimization on columns where maxVersions = 1.
+      requestFilter.addFilter(new ColumnPaginationFilter(1, 0));
+    }
+
     // Also add the user-specified column filter if requested.
     KijiColumnFilter userColumnFilter = columnRequest.getFilter();
     if (null != userColumnFilter) {
@@ -267,14 +284,6 @@ public class HBaseDataRequestAdapter {
       Filter hBaseFilter = userColumnFilter.toHBaseFilter(kijiColumnName,
           new NameTranslatingFilterContext(columnNameTranslator));
       requestFilter.addFilter(hBaseFilter);
-    }
-
-    if (kijiColumnName.isFullyQualified() && !columnRequest.isPagingEnabled()) {
-      // Limit the max versions. This optimization only works for requests for particular
-      // columns within a family. We can't do this for "give me all the cells in a family"
-      // requests because there's no HBase filter that does "give me N versions from each
-      // qualifier." That's okay though; it will get filtered by HBaseKijiRowData.
-      requestFilter.addFilter(new ColumnPaginationFilter(columnRequest.getMaxVersions(), 0));
     }
 
     return requestFilter;
